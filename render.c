@@ -1,9 +1,11 @@
+#include "background-image.h"
+#include "background-screenshot.h"
+#include "cairo.h"
+#include "swaylock.h"
 #include <math.h>
 #include <stdlib.h>
+#include "log.h"
 #include <wayland-client.h>
-#include "cairo.h"
-#include "background-image.h"
-#include "swaylock.h"
 
 #define M_PI 3.14159265358979323846
 const float TYPE_INDICATOR_RANGE = M_PI / 3.0f;
@@ -61,6 +63,34 @@ void render_frame_background(struct swaylock_surface *surface) {
 	}
 	cairo_restore(cairo);
 	cairo_identity_matrix(cairo);
+
+	// ========================================================================
+	cairo_surface_t* screenshot = load_background_screenshot(state, surface);
+	double width = cairo_image_surface_get_width(screenshot);
+	double height = cairo_image_surface_get_height(screenshot);
+
+	cairo_save(cairo);
+
+	double window_ratio = (double)buffer_width / buffer_height;
+	double bg_ratio = width / height;
+
+	if (window_ratio > bg_ratio) {
+		double scale = (double)buffer_width / width;
+		cairo_scale(cairo, scale, scale);
+		cairo_set_source_surface(cairo, screenshot, 0,
+                                (double)buffer_height / 2 / scale - height / 2);
+	} else {
+		double scale = (double)buffer_height / height;
+		cairo_scale(cairo, scale, scale);
+		cairo_set_source_surface(cairo, screenshot,
+                    (double)buffer_width / 2 / scale - width / 2, 0);
+	}
+
+	cairo_paint(cairo);
+	cairo_restore(cairo);
+
+	cairo_surface_destroy(screenshot);
+	// ========================================================================
 
 	wl_surface_set_buffer_scale(surface->surface, surface->scale);
 	wl_surface_attach(surface->surface, surface->current_buffer->buffer, 0, 0);

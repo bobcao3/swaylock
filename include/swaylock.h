@@ -1,13 +1,14 @@
 #ifndef _SWAYLOCK_H
 #define _SWAYLOCK_H
-#include <stdbool.h>
-#include <stdint.h>
-#include <wayland-client.h>
 #include "background-image.h"
 #include "cairo.h"
 #include "pool-buffer.h"
 #include "seat.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "wlr-screencopy-unstable-v1-client-protocol.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <wayland-client.h>
 
 enum auth_state {
 	AUTH_STATE_IDLE,
@@ -79,6 +80,7 @@ struct swaylock_state {
 	struct wl_subcompositor *subcompositor;
 	struct zwlr_layer_shell_v1 *layer_shell;
 	struct zwlr_input_inhibit_manager_v1 *input_inhibit_manager;
+	struct zwlr_screencopy_manager_v1 *screencopy_manager;
 	struct wl_shm *shm;
 	struct wl_list surfaces;
 	struct wl_list images;

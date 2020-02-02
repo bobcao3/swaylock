@@ -42,6 +42,7 @@ cairo          = dependency('cairo')
 gdk_pixbuf     = dependency('gdk-pixbuf-2.0', required: get_option('gdk-pixbuf'))
 bash_comp      = dependency('bash-completion', required: false)
 fish_comp      = dependency('fish', required: false)
+rt             = cc.find_library('rt')
 libpam         = cc.find_library('pam', required: get_option('pam'))
 crypt          = cc.find_library('crypt', required: not libpam.found())
 math           = cc.find_library('m')
@@ -88,6 +89,7 @@ client_protocols = [
 	[wl_protocol_dir, 'unstable/xdg-output/xdg-output-unstable-v1.xml'],
 	['wlr-layer-shell-unstable-v1.xml'],
 	['wlr-input-inhibitor-unstable-v1.xml'],
+	['wlr-screencopy-unstable-v1.xml']
 ]
 
 foreach p : client_protocols
@@ -119,10 +121,12 @@ dependencies = [
 	math,
 	xkbcommon,
 	wayland_client,
+	rt
 ]
 
 sources = [
 	'background-image.c',
+	'background-screenshot.c',
 	'cairo.c',
 	'comm.c',
 	'log.c',

@@ -342,7 +342,9 @@ static void handle_global(void *data, struct wl_registry *registry,
 			create_layer_surface(surface);
 			wl_display_roundtrip(state->display);
 		}
-	}
+	} else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
+    	state->screencopy_manager = wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 1);
+  	}
 }
 
 static void handle_global_remove(void *data, struct wl_registry *registry,
