@@ -148,8 +148,8 @@ void write_image_fast(uint8_t *im, int x, int y, size_t width, size_t height,
   ((uint32_t *)im)[x + y * width] = data;
 }
 
-const int radius = 16;
-const int radius_log2 = 5;
+const int radius = 32;
+const int radius_log2 = 6;
 
 // O(n+k) fast box blur, n = screen resolution, k = blur radius
 #pragma GCC optimize("O3", "Ofast")
