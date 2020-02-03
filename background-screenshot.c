@@ -17,14 +17,18 @@ struct format {
   bool is_bgr;
 };
 
-static struct {
-  struct wl_buffer *wl_buffer;
-  void *data;
-  enum wl_shm_format format;
-  int width, height, stride;
-  bool y_invert;
-} buffer;
-bool buffer_copy_done = false;
+struct screenshot_state {
+  struct {
+    struct wl_buffer *wl_buffer;
+    void *data;
+    enum wl_shm_format format;
+    int width, height, stride;
+    bool y_invert;
+  } buffer;
+
+  struct wl_shm* shm;
+  bool buffer_copy_done;
+};
 
 // wl_shm_format describes little-endian formats, libpng uses big-endian
 // formats (so Wayland's ABGR is libpng's RGBA).
@@ -35,10 +39,9 @@ bool buffer_copy_done = false;
     {WL_SHM_FORMAT_ABGR8888, false},
 };*/
 
-static struct wl_shm *shm = NULL;
-
 static struct wl_buffer *create_shm_buffer(enum wl_shm_format fmt, int width,
                                            int height, int stride,
+                                           struct wl_shm* shm,
                                            void **data_out) {
   int size = stride * height;
 
@@ -81,31 +84,40 @@ static void frame_handle_buffer(void *data,
                                 struct zwlr_screencopy_frame_v1 *frame,
                                 uint32_t format, uint32_t width,
                                 uint32_t height, uint32_t stride) {
-  buffer.format = format;
-  buffer.width = width;
-  buffer.height = height;
-  buffer.stride = stride;
-  buffer.wl_buffer =
-      create_shm_buffer(format, width, height, stride, &buffer.data);
-  if (buffer.wl_buffer == NULL) {
+  struct screenshot_state *screenshot_state = (struct screenshot_state *)data;
+
+  screenshot_state->buffer.format = format;
+  screenshot_state->buffer.width = width;
+  screenshot_state->buffer.height = height;
+  screenshot_state->buffer.stride = stride;
+  screenshot_state->buffer.wl_buffer =
+      create_shm_buffer(format, width, height, stride, screenshot_state->shm,
+                        &screenshot_state->buffer.data);
+  
+  if (screenshot_state->buffer.wl_buffer == NULL) {
     fprintf(stderr, "failed to create buffer\n");
     exit(EXIT_FAILURE);
   }
 
-  zwlr_screencopy_frame_v1_copy(frame, buffer.wl_buffer);
+  zwlr_screencopy_frame_v1_copy(frame, screenshot_state->buffer.wl_buffer);
 }
 
 static void frame_handle_flags(void *data,
                                struct zwlr_screencopy_frame_v1 *frame,
                                uint32_t flags) {
-  buffer.y_invert = flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT;
+  struct screenshot_state *screenshot_state = (struct screenshot_state *)data;
+
+  screenshot_state->buffer.y_invert =
+      flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT;
 }
 
 static void frame_handle_ready(void *data,
                                struct zwlr_screencopy_frame_v1 *frame,
                                uint32_t tv_sec_hi, uint32_t tv_sec_lo,
                                uint32_t tv_nsec) {
-  buffer_copy_done = true;
+  struct screenshot_state *screenshot_state = (struct screenshot_state *)data;
+
+  screenshot_state->buffer_copy_done = true;
 }
 
 static void frame_handle_failed(void *data,
@@ -115,10 +127,10 @@ static void frame_handle_failed(void *data,
 }
 
 static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
-    .buffer = frame_handle_buffer,
-    .flags = frame_handle_flags,
-    .ready = frame_handle_ready,
-    .failed = frame_handle_failed,
+  .buffer = frame_handle_buffer,
+  .flags = frame_handle_flags,
+  .ready = frame_handle_ready,
+  .failed = frame_handle_failed,
 };
 
 #define IMAGE_XY(x, y, width) ((x) + (y) * (width))
@@ -149,13 +161,17 @@ void write_image_fast(uint8_t *im, int x, int y, size_t width, size_t height,
 }
 
 const int radius = 32;
-const int radius_log2 = 6;
+const int radius_log2 = 5;
+const int diameter_log2 = 6;
 
 // O(n+k) fast box blur, n = screen resolution, k = blur radius
 #pragma GCC optimize("O3", "Ofast")
 void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height) {
   for (int i = 0; i < (int)width; i++) {
-    uint32_t r = 0, g = 0, b = 0;
+    size_t line_start = IMAGE_XY(i, 0, width) << 2;
+    uint32_t r = ((uint32_t)src[line_start + 2]) << radius_log2,
+             g = ((uint32_t)src[line_start + 1]) << radius_log2,
+             b = ((uint32_t)src[line_start]) << radius_log2;
     for (int j = 0; j < (int)height + radius; j++) {
       size_t idx = IMAGE_XY(i, j >= (int)height ? (int)height - 1 : j, width)
                    << 2;
@@ -164,17 +180,15 @@ void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height) {
       g += src[idx + 1];
       b += src[idx];
 
-      if (j >= radius << 1) {
-        size_t idx = IMAGE_XY(i, j - (radius << 1), width) << 2;
+      if (j >= radius) {
+        size_t idx = IMAGE_XY(i, j >= (radius << 1) ? j - (radius << 1) : 0, width) << 2;
         r -= src[idx + 2];
         g -= src[idx + 1];
         b -= src[idx];
-      }
 
-      if (j >= radius) {
-        uint32_t _r = r >> radius_log2;
-        uint32_t _g = g >> radius_log2;
-        uint32_t _b = b >> radius_log2;
+        uint32_t _r = r >> diameter_log2;
+        uint32_t _g = g >> diameter_log2;
+        uint32_t _b = b >> diameter_log2;
         ((uint32_t *)target)[IMAGE_XY(i, j - radius, width)] =
             0xFF000000 | (_r << 16) | (_g << 8) | _b;
       }
@@ -185,7 +199,10 @@ void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height) {
 #pragma GCC optimize("O3", "Ofast")
 void fast_blur_H(uint8_t *target, uint8_t *src, size_t width, size_t height) {
   for (int j = 0; j < (int)height; j++) {
-    uint32_t r = 0, g = 0, b = 0;
+    size_t line_start = IMAGE_XY(0, j, width) << 2;
+    uint32_t r = ((uint32_t)src[line_start + 2]) << radius_log2,
+             g = ((uint32_t)src[line_start + 1]) << radius_log2,
+             b = ((uint32_t)src[line_start]) << radius_log2;
     for (int i = 0; i < (int)width + radius; i++) {
       size_t idx = IMAGE_XY(i >= (int)width ? (int)width - 1 : i, j, width) << 2;
 
@@ -193,17 +210,15 @@ void fast_blur_H(uint8_t *target, uint8_t *src, size_t width, size_t height) {
       g += src[idx + 1];
       b += src[idx];
 
-      if (i >= radius << 1) {
-        size_t idx = IMAGE_XY(i - (radius << 1), j, width) << 2;
+      if (i >= radius) {
+        size_t idx = IMAGE_XY(i > (radius << 1) ? i - (radius << 1) : 0, j, width) << 2;
         r -= src[idx + 2];
         g -= src[idx + 1];
         b -= src[idx];
-      }
 
-      if (i >= radius) {
-        uint32_t _r = r >> radius_log2;
-        uint32_t _g = g >> radius_log2;
-        uint32_t _b = b >> radius_log2;
+        uint32_t _r = r >> diameter_log2;
+        uint32_t _g = g >> diameter_log2;
+        uint32_t _b = b >> diameter_log2;
         ((uint32_t *)target)[IMAGE_XY(i - radius, j, width)] =
             0xFF000000 | (_r << 16) | (_g << 8) | _b;
       }
@@ -219,48 +234,57 @@ void fast_copy_flip(uint8_t *target, uint8_t *src, size_t width,
 }
 
 cairo_surface_t *load_background_screenshot(struct swaylock_state *state, struct swaylock_surface *surface) {
+  struct screenshot_state screenshot_state;
+  screenshot_state.buffer_copy_done = false;
+  screenshot_state.shm = state->shm;
+
   struct zwlr_screencopy_frame_v1 *frame =
       zwlr_screencopy_manager_v1_capture_output(state->screencopy_manager, 0,
                                                 surface->output);
-  zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener, NULL);
+  zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener,
+                                        &screenshot_state);
 
-  shm = state->shm;
-
-  while (!buffer_copy_done && wl_display_dispatch(state->display) != -1) {
+  while (!screenshot_state.buffer_copy_done &&
+         wl_display_dispatch(state->display) != -1) {
     // This space is intentionally left blank
   }
 
-  buffer_copy_done = false;
+  screenshot_state.buffer_copy_done = false;
 
-  uint8_t *interim = malloc(buffer.width * buffer.height * 4);
-  uint8_t *data = malloc(buffer.width * buffer.height * 4);
+  size_t width = screenshot_state.buffer.width;
+  size_t height = screenshot_state.buffer.height;
 
-  fast_copy_flip(data, buffer.data, buffer.width, buffer.height);
+  uint8_t *interim = malloc(width * height * 4);
+  uint8_t *data = malloc(width * height * 4);
+
+  fast_copy_flip(data, screenshot_state.buffer.data, width, height);
 
   struct timespec start, end;
 
   clock_gettime(CLOCK_MONOTONIC, &start);
-  fast_blur_V(interim, data, buffer.width, buffer.height);
-  fast_blur_V(data, interim, buffer.width, buffer.height);
-  fast_blur_V(interim, data, buffer.width, buffer.height);
-  fast_blur_H(data, interim, buffer.width, buffer.height);
-  fast_blur_H(interim, data, buffer.width, buffer.height);
-  fast_blur_H(data, interim, buffer.width, buffer.height);
+  fast_blur_V(interim, data, width, height);
+  fast_blur_V(data, interim, width, height);
+  fast_blur_V(interim, data, width, height);
+  fast_blur_H(data, interim, width, height);
+  fast_blur_H(interim, data, width, height);
+  fast_blur_H(data, interim, width, height);
   clock_gettime(CLOCK_MONOTONIC, &end);
 
   double time_taken;
   time_taken = (end.tv_sec - start.tv_sec) * 1e9;
   time_taken = (time_taken + (end.tv_nsec - start.tv_nsec)) * 1e-9;
 
-  swaylock_log(LOG_DEBUG, "Blurring time: %f s", time_taken);
+  swaylock_log(LOG_DEBUG, "Blurring time of %ld x %ld: %f s", width, height, time_taken);
 
   free(interim);
 
   cairo_surface_t *image = cairo_image_surface_create_for_data(
-      data, CAIRO_FORMAT_ARGB32, buffer.width, buffer.height, buffer.stride);
+      data, CAIRO_FORMAT_ARGB32, width, height,
+      screenshot_state.buffer.stride);
 
-  munmap(buffer.data, buffer.stride * buffer.height);
-  wl_buffer_destroy(buffer.wl_buffer);
+  munmap(screenshot_state.buffer.data,
+         screenshot_state.buffer.stride * height);
+  wl_buffer_destroy(screenshot_state.buffer.wl_buffer);
   zwlr_screencopy_frame_v1_destroy(frame);
 
   return image;
