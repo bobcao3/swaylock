@@ -168,12 +168,8 @@ void write_image_fast(uint8_t *im, int x, int y, size_t width, size_t height,
   ((uint32_t *)im)[x + y * width] = data;
 }
 
-const int radius = 32;
-const int radius_log2 = 5;
-const int diameter_log2 = 6;
-
 // O(n+k) fast box blur, n = screen resolution, k = blur radius
-void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height, int start, int end) {
+void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height, int start, int end, int radius, int radius_log2) {
   for (int i = start; i < (int)end; i++) {
     size_t line_start = IMAGE_XY(i, 0, width) << 2;
     uint32_t r = ((uint32_t)src[line_start + 2]) << radius_log2,
@@ -193,9 +189,9 @@ void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height, int
         g -= src[idx + 1];
         b -= src[idx];
 
-        uint32_t _r = r >> diameter_log2;
-        uint32_t _g = g >> diameter_log2;
-        uint32_t _b = b >> diameter_log2;
+        uint32_t _r = r >> radius_log2 >> 1;
+        uint32_t _g = g >> radius_log2 >> 1;
+        uint32_t _b = b >> radius_log2 >> 1;
         ((uint32_t *)target)[IMAGE_XY(i, j - radius, width)] =
             0xFF000000 | (_r << 16) | (_g << 8) | _b;
       }
@@ -204,7 +200,7 @@ void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height, int
 }
 
 void fast_blur_H(uint8_t *target, uint8_t *src, size_t width, size_t height,
-                 int start, int end) {
+                 int start, int end, int radius, int radius_log2) {
   for (int j = start; j < end; j++) {
     size_t line_start = IMAGE_XY(0, j, width) << 2;
     uint32_t r = ((uint32_t)src[line_start + 2]) << radius_log2,
@@ -223,9 +219,9 @@ void fast_blur_H(uint8_t *target, uint8_t *src, size_t width, size_t height,
         g -= src[idx + 1];
         b -= src[idx];
 
-        uint32_t _r = r >> diameter_log2;
-        uint32_t _g = g >> diameter_log2;
-        uint32_t _b = b >> diameter_log2;
+        uint32_t _r = r >> radius_log2 >> 1;
+        uint32_t _g = g >> radius_log2 >> 1;
+        uint32_t _b = b >> radius_log2 >> 1;
         ((uint32_t *)target)[IMAGE_XY(i - radius, j, width)] =
             0xFF000000 | (_r << 16) | (_g << 8) | _b;
       }
@@ -241,6 +237,7 @@ struct pthread_blur_args {
   size_t height;
   int start;
   int end;
+  int radius, radius_log2;
 
   bool job_finished;
   sem_t Vfinished;
@@ -248,16 +245,22 @@ struct pthread_blur_args {
 
 void* pthread_blur(void* args) {
   struct pthread_blur_args *a = args;
-  fast_blur_V(a->interim, a->data, a->width, a->height, a->start, a->end);
-  fast_blur_V(a->data, a->interim, a->width, a->height, a->start, a->end);
-  fast_blur_V(a->interim, a->data, a->width, a->height, a->start, a->end);
+  fast_blur_V(a->interim, a->data, a->width, a->height, a->start, a->end,
+              a->radius, a->radius_log2);
+  fast_blur_V(a->data, a->interim, a->width, a->height, a->start, a->end,
+              a->radius, a->radius_log2);
+  fast_blur_V(a->interim, a->data, a->width, a->height, a->start, a->end,
+              a->radius, a->radius_log2);
 
   a->job_finished = true;
   sem_wait(&a->Vfinished);
 
-  fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end);
-  fast_blur_H(a->data, a->interim, a->width, a->height, a->start, a->end);
-  fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end);
+  fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end,
+              a->radius, a->radius_log2);
+  fast_blur_H(a->data, a->interim, a->width, a->height, a->start, a->end,
+              a->radius, a->radius_log2);
+  fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end,
+              a->radius, a->radius_log2);
 
   pthread_exit(0);
 }
@@ -300,6 +303,11 @@ cairo_surface_t *load_background_screenshot(struct swaylock_state *state, struct
 
   clock_gettime(CLOCK_MONOTONIC, &start);
 
+  int radius = 32 * surface->scale;
+  int radius_log2 = (int)log2(radius);
+
+  swaylock_log(LOG_DEBUG, "Blur radius: %d", radius);
+
 #ifdef USE_PTHREAD
   int num_procs = get_nprocs();
 
@@ -315,6 +323,8 @@ cairo_surface_t *load_background_screenshot(struct swaylock_state *state, struct
     args[i].start = width * i / num_procs;
     args[i].end = width * (i + 1) / num_procs;
     args[i].job_finished = false;
+    args[i].radius = radius;
+    args[i].radius_log2 = radius_log2;
 
     sem_init(&args[i].Vfinished, 0, 0);
 
@@ -326,11 +336,11 @@ cairo_surface_t *load_background_screenshot(struct swaylock_state *state, struct
   // This redues spin wait because the main thread is probably going to finish
   // the work in the similar amount of time.
   fast_blur_V(interim, data, width, height, width * (num_procs - 1) / num_procs,
-              width);
+              width, radius, radius_log2);
   fast_blur_V(data, interim, width, height, width * (num_procs - 1) / num_procs,
-              width);
+              width, radius, radius_log2);
   fast_blur_V(interim, data, width, height, width * (num_procs - 1) / num_procs,
-              width);
+              width, radius, radius_log2);
 
   bool v_finished = false;
   while (!v_finished) {
@@ -348,22 +358,27 @@ cairo_surface_t *load_background_screenshot(struct swaylock_state *state, struct
   }
 
   fast_blur_H(data, interim, width, height,
-              height * (num_procs - 1) / num_procs, height);
+              height * (num_procs - 1) / num_procs, height, radius, radius_log2);
   fast_blur_H(interim, data, width, height,
-              height * (num_procs - 1) / num_procs, height);
+              height * (num_procs - 1) / num_procs, height, radius, radius_log2);
   fast_blur_H(data, interim, width, height,
-              height * (num_procs - 1) / num_procs, height);
+              height * (num_procs - 1) / num_procs, height, radius, radius_log2);
 
   for (int i = 0; i < num_procs - 1; i++) {
     pthread_join(workers[i], NULL);
   }
 #else
-  fast_blur_V(interim, data, width, height, 0, width);
-  fast_blur_V(data, interim, width, height, 0, width);
-  fast_blur_V(interim, data, width, height, 0, width);
-  fast_blur_H(data, interim, width, height, 0, height);
-  fast_blur_H(interim, data, width, height, 0, height);
-  fast_blur_H(data, interim, width, height, 0, height);
+  fast_blur_V(interim, data, width, height, 0, width, radius, radius_log2, diameter_log2);
+  fast_blur_V(data, interim, width, height, 0, width, radius, radius_log2,
+              diameter_log2);
+  fast_blur_V(interim, data, width, height, 0, width, radius, radius_log2,
+              diameter_log2);
+  fast_blur_H(data, interim, width, height, 0, height, radius, radius_log2,
+              diameter_log2);
+  fast_blur_H(interim, data, width, height, 0, height, radius, radius_log2,
+              diameter_log2);
+  fast_blur_H(data, interim, width, height, 0, height, radius, radius_log2,
+              diameter_log2);
 #endif
 
   clock_gettime(CLOCK_MONOTONIC, &end);
