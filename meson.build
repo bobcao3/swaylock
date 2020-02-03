@@ -17,6 +17,7 @@ add_project_arguments(
 		'-Wno-unused-result',
 		'-Wundef',
 		'-Wvla',
+		'-Wno-vla'
 	],
 	language: 'c',
 )
@@ -35,6 +36,7 @@ if is_freebsd
 	add_project_arguments('-D_C11_SOURCE', language: 'c')
 endif
 
+threads        = dependency('threads')
 wayland_client = dependency('wayland-client')
 wayland_protos = dependency('wayland-protocols', version: '>=1.14')
 xkbcommon      = dependency('xkbcommon')
@@ -115,6 +117,7 @@ conf_data.set10('HAVE_GDK_PIXBUF', gdk_pixbuf.found())
 subdir('include')
 
 dependencies = [
+	threads,
 	cairo,
 	client_protos,
 	gdk_pixbuf,

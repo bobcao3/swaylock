@@ -12,6 +12,14 @@
 #include <time.h>
 #include <wayland-client-protocol.h>
 
+#define USE_PTHREAD
+
+#ifdef USE_PTHREAD
+#include <pthread.h>
+#include <sys/sysinfo.h>
+#include <semaphore.h>
+#endif
+
 struct format {
   enum wl_shm_format wl_format;
   bool is_bgr;
@@ -165,9 +173,8 @@ const int radius_log2 = 5;
 const int diameter_log2 = 6;
 
 // O(n+k) fast box blur, n = screen resolution, k = blur radius
-#pragma GCC optimize("O3", "Ofast")
-void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height) {
-  for (int i = 0; i < (int)width; i++) {
+void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height, int start, int end) {
+  for (int i = start; i < (int)end; i++) {
     size_t line_start = IMAGE_XY(i, 0, width) << 2;
     uint32_t r = ((uint32_t)src[line_start + 2]) << radius_log2,
              g = ((uint32_t)src[line_start + 1]) << radius_log2,
@@ -196,9 +203,9 @@ void fast_blur_V(uint8_t *target, uint8_t *src, size_t width, size_t height) {
   }
 }
 
-#pragma GCC optimize("O3", "Ofast")
-void fast_blur_H(uint8_t *target, uint8_t *src, size_t width, size_t height) {
-  for (int j = 0; j < (int)height; j++) {
+void fast_blur_H(uint8_t *target, uint8_t *src, size_t width, size_t height,
+                 int start, int end) {
+  for (int j = start; j < end; j++) {
     size_t line_start = IMAGE_XY(0, j, width) << 2;
     uint32_t r = ((uint32_t)src[line_start + 2]) << radius_log2,
              g = ((uint32_t)src[line_start + 1]) << radius_log2,
@@ -225,6 +232,36 @@ void fast_blur_H(uint8_t *target, uint8_t *src, size_t width, size_t height) {
     }
   }
 }
+
+#ifdef USE_PTHREAD
+struct pthread_blur_args {
+  uint8_t *interim;
+  uint8_t *data;
+  size_t width;
+  size_t height;
+  int start;
+  int end;
+
+  bool job_finished;
+  sem_t Vfinished;
+};
+
+void* pthread_blur(void* args) {
+  struct pthread_blur_args *a = args;
+  fast_blur_V(a->interim, a->data, a->width, a->height, a->start, a->end);
+  fast_blur_V(a->data, a->interim, a->width, a->height, a->start, a->end);
+  fast_blur_V(a->interim, a->data, a->width, a->height, a->start, a->end);
+
+  a->job_finished = true;
+  sem_wait(&a->Vfinished);
+
+  fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end);
+  fast_blur_H(a->data, a->interim, a->width, a->height, a->start, a->end);
+  fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end);
+
+  pthread_exit(0);
+}
+#endif
 
 void fast_copy_flip(uint8_t *target, uint8_t *src, size_t width,
                     size_t height) {
@@ -262,12 +299,73 @@ cairo_surface_t *load_background_screenshot(struct swaylock_state *state, struct
   struct timespec start, end;
 
   clock_gettime(CLOCK_MONOTONIC, &start);
-  fast_blur_V(interim, data, width, height);
-  fast_blur_V(data, interim, width, height);
-  fast_blur_V(interim, data, width, height);
-  fast_blur_H(data, interim, width, height);
-  fast_blur_H(interim, data, width, height);
-  fast_blur_H(data, interim, width, height);
+
+#ifdef USE_PTHREAD
+  int num_procs = get_nprocs();
+
+  // Spawn num_procs - 1 threads while the main thread blurs the last portion
+  pthread_t workers[num_procs - 1];
+  struct pthread_blur_args args[num_procs - 1];
+
+  for (int i = 0; i < num_procs - 1; i++) {
+    args[i].data = data;
+    args[i].interim = interim;
+    args[i].width = width;
+    args[i].height = height;
+    args[i].start = width * i / num_procs;
+    args[i].end = width * (i + 1) / num_procs;
+    args[i].job_finished = false;
+
+    sem_init(&args[i].Vfinished, 0, 0);
+
+    if (pthread_create(&workers[i], NULL, pthread_blur, &args[i])) {
+      swaylock_log(LOG_ERROR, "Failed to create thread");
+    }
+  }
+
+  // This redues spin wait because the main thread is probably going to finish
+  // the work in the similar amount of time.
+  fast_blur_V(interim, data, width, height, width * (num_procs - 1) / num_procs,
+              width);
+  fast_blur_V(data, interim, width, height, width * (num_procs - 1) / num_procs,
+              width);
+  fast_blur_V(interim, data, width, height, width * (num_procs - 1) / num_procs,
+              width);
+
+  bool v_finished = false;
+  while (!v_finished) {
+    v_finished = true;
+    for (int i = 0; i < num_procs - 1; i++) {
+      v_finished = v_finished && args[i].job_finished;
+    }
+  }
+
+  for (int i = 0; i < num_procs - 1; i++) {
+    args[i].start = height * i / num_procs;
+    args[i].end = i == num_procs - 1 ? height : height * (i + 1) / num_procs;
+
+    sem_post(&args[i].Vfinished);
+  }
+
+  fast_blur_H(data, interim, width, height,
+              height * (num_procs - 1) / num_procs, height);
+  fast_blur_H(interim, data, width, height,
+              height * (num_procs - 1) / num_procs, height);
+  fast_blur_H(data, interim, width, height,
+              height * (num_procs - 1) / num_procs, height);
+
+  for (int i = 0; i < num_procs - 1; i++) {
+    pthread_join(workers[i], NULL);
+  }
+#else
+  fast_blur_V(interim, data, width, height, 0, width);
+  fast_blur_V(data, interim, width, height, 0, width);
+  fast_blur_V(interim, data, width, height, 0, width);
+  fast_blur_H(data, interim, width, height, 0, height);
+  fast_blur_H(interim, data, width, height, 0, height);
+  fast_blur_H(data, interim, width, height, 0, height);
+#endif
+
   clock_gettime(CLOCK_MONOTONIC, &end);
 
   double time_taken;
