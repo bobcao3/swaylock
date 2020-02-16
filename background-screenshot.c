@@ -255,11 +255,11 @@ void* pthread_blur(void* args) {
   a->job_finished = true;
   sem_wait(&a->Vfinished);
 
-  fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end,
-              a->radius, a->radius_log2);
   fast_blur_H(a->data, a->interim, a->width, a->height, a->start, a->end,
               a->radius, a->radius_log2);
   fast_blur_H(a->interim, a->data, a->width, a->height, a->start, a->end,
+              a->radius, a->radius_log2);
+  fast_blur_H(a->data, a->interim, a->width, a->height, a->start, a->end,
               a->radius, a->radius_log2);
 
   pthread_exit(0);
@@ -352,7 +352,7 @@ cairo_surface_t *load_background_screenshot(struct swaylock_state *state, struct
 
   for (int i = 0; i < num_procs - 1; i++) {
     args[i].start = height * i / num_procs;
-    args[i].end = i == num_procs - 1 ? height : height * (i + 1) / num_procs;
+    args[i].end = height * (i + 1) / num_procs;
 
     sem_post(&args[i].Vfinished);
   }
